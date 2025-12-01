@@ -5,6 +5,8 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
+from scipy.stats import pearsonr, spearmanr, linregress
+
 
 
 # Import from other modules
@@ -22,9 +24,11 @@ class SimplicityBiasExperiment:
         self.engine = engine
         self.metric = metric
         self.results = {}  # rule -> list of images
+        self.num_seeds_used = 0
 
     def run_batch(self, num_seeds: int, rules=range(256)):
         """Generates data."""
+        self.num_seeds_used = num_seeds
         seeds = [self.engine.generate_seed() for _ in range(num_seeds)]
 
         # tqdm displays a progress bar in the console
@@ -72,11 +76,10 @@ class SimplicityBiasExperiment:
             np.random.shuffle(row)
         return shuffled
 
-    # TODO add an optional argument for additions to the title
-    def plot_results(self, freq_map, complexity_map):
+    """This function specifically was written by AI, since it's a plotting function"""
+    def plot_results(self, freq_map, complexity_map, title_add: str = ""):
         """
-        Visualizes the Simplicity Bias.
-        Creates a graph of complexity against the log of probabilities.
+        Visualizes the Simplicity Bias with Upper Bound Fit and Stats.
         """
         Ks = []  # Complexities
         log_probs = []  # log(Probability)
@@ -86,12 +89,77 @@ class SimplicityBiasExperiment:
             Ks.append(complexity_map[h])
             log_probs.append(np.log10(count / total))
 
-        plt.scatter(Ks, log_probs, alpha=0.5)
-        plt.xlabel(f"Complexity ({self.metric.name()})")
-        plt.ylabel("Log Probability")
-        plt.title("Simplicity Bias")
-        plt.show()
+        # Convert to numpy for calculations
+        Ks = np.array(Ks)
+        log_probs = np.array(log_probs)
 
+        # ---------------- CORRELATIONS ----------------
+        if len(Ks) > 1:
+            pearson_corr, _ = pearsonr(Ks, log_probs)
+            spearman_corr, _ = spearmanr(Ks, log_probs)
+        else:
+            pearson_corr = spearman_corr = 0
+
+        # ---------------- UPPER BOUND FITTING ----------------
+        # 1. Find max probability for each unique complexity value
+        unique_ks = np.unique(Ks)
+        max_log_probs = []
+        for k in unique_ks:
+            # Get all log_probs that have complexity == k
+            max_val = np.max(log_probs[Ks == k])
+            max_log_probs.append(max_val)
+
+        unique_ks = np.array(unique_ks)
+        max_log_probs = np.array(max_log_probs)
+
+        # 2. Fit linear regression to the upper bound (y = mx + c)
+        if len(unique_ks) > 1:
+            slope, intercept, r_val, p_val, std_err = linregress(unique_ks, max_log_probs)
+        else:
+            slope, intercept = 0, 0
+
+        # 3. Convert to form P(p) = 2^(-aK - b)
+        # We fitted log10(P) = slope * K + intercept
+        # a = -slope * log2(10), b = -intercept * log2(10)
+        log2_10 = np.log2(10)
+        a_param = -slope * log2_10
+        b_param = -intercept * log2_10
+
+        # ---------------- PLOTTING ----------------
+        plt.figure(figsize=(10, 7))
+
+        # Scatter Plot
+        plt.scatter(Ks, log_probs, alpha=0.5, label='Phenotypes')
+
+        # Plot Fitted Line
+        x_line = np.linspace(min(Ks), max(Ks), 100)
+        y_line = slope * x_line + intercept
+        plt.plot(x_line, y_line, color='red', linestyle='--', linewidth=2, label='Upper Bound Fit')
+
+        # Labels
+        plt.xlabel(f"Complexity ({self.metric.name()})")
+        plt.ylabel("Log10 Probability")
+        plt.title(f"Simplicity Bias (Standard CA, L={self.engine.L}, T={self.engine.T}), " + title_add)
+
+        # Info Box
+        stats_text = (
+            f"Simulation Parameters:\n"
+            f"  N_seeds = {self.num_seeds_used}\n\n"
+            f"Correlations:\n"
+            f"  Spearman = {spearman_corr:.3f}\n"
+            f"  Pearson = {pearson_corr:.3f}\n\n"
+            f"Fit P = 2^(-aK - b):\n"
+            f"  a = {a_param:.3f}\n"
+            f"  b = {b_param:.3f}"
+        )
+
+        props = dict(boxstyle='round', facecolor='white', alpha=0.8)
+        plt.text(0.95, 0.95, stats_text, transform=plt.gca().transAxes, fontsize=10,
+                 verticalalignment='top', horizontalalignment='right', bbox=props)
+
+        plt.grid(True, alpha=0.3)
+        plt.legend(loc='lower left')
+        plt.show()
 
 def compute_ncc(img1: np.ndarray, img2: np.ndarray) -> float:
     """
@@ -240,6 +308,51 @@ class RobustnessExperiment:
             mean_complexities[rule] = np.mean(complexities)
         return mean_complexities
 
+    """This function is AI generated."""
+    def analyze_and_plot(self, robustness_scores: dict, phenotype_complexities: dict, mutation_type="Mutating Seeds"):
+        """
+        Plots Robustness vs Complexity and calculates correlations.
+        """
+        # 1. Align data (ensure we match the same rule for X and Y)
+        # We sort by rule ID to ensure lists correspond index-for-index
+        rules = sorted(robustness_scores.keys())
+
+        # X = Complexity, Y = Robustness
+        Xs = [phenotype_complexities[r] for r in rules]
+        Ys = [robustness_scores[r] for r in rules]
+
+        # 2. Calculate Correlations
+        pearson_val, _ = pearsonr(Xs, Ys)
+        spearman_val, _ = spearmanr(Xs, Ys)
+
+        # 3. Plotting
+        plt.figure(figsize=(10, 7))
+        plt.scatter(Xs, Ys, alpha=0.6, c='teal', edgecolors='black', linewidth=0.5)
+
+        plt.xlabel(f"Phenotype Complexity ({self.metric.name()})")
+        plt.ylabel("Robustness (Avg NCC)")
+
+        # Pull L and T from the engine instance
+        L = self.engine.L
+        T = self.engine.T
+        plt.title(f"1D CA Robustness VS Complexity, {mutation_type}. L={L}, T={T}")
+
+        # 4. Info Box with Stats
+        stats_text = (
+            f"Correlations:\n"
+            f"  Spearman = {spearman_val:.3f}\n"
+            f"  Pearson = {pearson_val:.3f}"
+        )
+
+        props = dict(boxstyle='round', facecolor='white', alpha=0.8)
+        plt.text(0.95, 0.95, stats_text, transform=plt.gca().transAxes, fontsize=10,
+                 verticalalignment='top', horizontalalignment='right', bbox=props)
+
+        plt.grid(True, alpha=0.3)
+        plt.show()
+
+
+
 """This experiment was done close to deadline, so mostly AI-generated"""
 class PopulationGrowthExperiment:
     """
@@ -251,9 +364,11 @@ class PopulationGrowthExperiment:
         self.engine = engine
         self.metric = metric
         self.results = {}  # rule -> list of binary sequences
+        self.num_seeds_used = 0
 
     def run_batch(self, num_seeds: int, rules=range(256)):
         """Generates population change sequences."""
+        self.num_seeds_used = num_seeds
         seeds = [self.engine.generate_seed() for _ in range(num_seeds)]
 
         for rule in tqdm(rules, desc="Simulating Population Rules"):
@@ -262,15 +377,14 @@ class PopulationGrowthExperiment:
                 # Run simulation (including t=0)
                 img = self.engine.run(rule, seed)
 
-                # 1. Calculate population at each step (sum of active cells)
+                # 1. Calculate population at each step
+                # IMPORTANT: Cast to signed int to prevent underflow
                 population = np.sum(img, axis=1).astype(int)
 
                 # 2. Calculate differences between steps
-                # diff[i] = population[i+1] - population[i]
                 diffs = np.diff(population)
 
                 # 3. Create binary sequence: 1 if grew/same, 0 if shrank
-                # astype(np.uint8) makes it 0 or 1
                 binary_seq = (diffs >= 0).astype(np.uint8)
 
                 binary_sequences.append(binary_seq)
@@ -279,7 +393,7 @@ class PopulationGrowthExperiment:
 
     def analyze_and_plot(self):
         """
-        Calculates complexity of the binary population sequences vs their Log Probability.
+        Calculates complexity, correlations, and fits the upper bound curve.
         """
         freq_map = Counter()
         complexity_map = {}
@@ -296,7 +410,7 @@ class PopulationGrowthExperiment:
                 # Calculate complexity of the 1D binary sequence
                 complexity_map[h] = self.metric.calculate(seq)
 
-        # Plotting
+        # ---------------- PREPARE DATA ----------------
         Ks = []
         log_probs = []
         total = sum(freq_map.values())
@@ -305,10 +419,81 @@ class PopulationGrowthExperiment:
             Ks.append(complexity_map[h])
             log_probs.append(np.log10(count / total))
 
-        plt.figure(figsize=(8, 6))
-        plt.scatter(Ks, log_probs, alpha=0.5, c='purple')
-        plt.xlabel(f"Complexity of Population Graph ({self.metric.name()})")
-        plt.ylabel("Log Probability")
+        Ks = np.array(Ks)
+        log_probs = np.array(log_probs)
+
+        # ---------------- CORRELATIONS ----------------
+        if len(Ks) > 1:
+            pearson_corr, _ = pearsonr(Ks, log_probs)
+            spearman_corr, _ = spearmanr(Ks, log_probs)
+        else:
+            pearson_corr = spearman_corr = 0
+
+        # ---------------- UPPER BOUND FITTING ----------------
+        # 1. Find max probability for each unique complexity value
+        unique_ks = np.unique(Ks)
+        max_log_probs = []
+        for k in unique_ks:
+            # Get all log_probs that have complexity == k
+            max_val = np.max(log_probs[Ks == k])
+            max_log_probs.append(max_val)
+
+        unique_ks = np.array(unique_ks)
+        max_log_probs = np.array(max_log_probs)
+
+        # 2. Fit linear regression to the upper bound points (y = mx + c)
+        # Using numpy polyfit or scipy linregress
+        if len(unique_ks) > 1:
+            slope, intercept, r_val, p_val, std_err = linregress(unique_ks, max_log_probs)
+        else:
+            slope, intercept = 0, 0
+
+        # 3. Convert to form P(p) = 2^(-aK - b)
+        # We fitted log10(P) = slope * K + intercept
+        # P = 10^(slope*K + intercept) = 2^(log2(10) * (slope*K + intercept))
+        # P = 2^( (slope * 3.32) * K + (intercept * 3.32) )
+        # So: -a = slope * 3.3219  => a = -slope * 3.3219
+        #     -b = intercept * 3.3219 => b = -intercept * 3.3219
+        log2_10 = np.log2(10)
+        a_param = -slope * log2_10
+        b_param = -intercept * log2_10
+
+        # ---------------- PLOTTING ----------------
+        plt.figure(figsize=(10, 7))
+
+        # 1. Scatter Plot
+        plt.scatter(Ks, log_probs, alpha=0.4, c='purple', label='Phenotypes', edgecolors='none')
+
+        # 2. Plot Fitted Line
+        # Generate x values for the line
+        x_line = np.linspace(min(Ks), max(Ks), 100)
+        y_line = slope * x_line + intercept
+        plt.plot(x_line, y_line, color='red', linestyle='--', linewidth=2, label='Upper Bound Fit')
+
+        # 3. Labels and Title
+        plt.xlabel(f"Complexity ({self.metric.name()})")
+        plt.ylabel("Log10 Probability")
         plt.title("Simplicity Bias in Population Dynamics")
+
+        # 4. Info Box with Params and Stats
+        stats_text = (
+            f"Simulation Parameters:\n"
+            f"  L = {self.engine.L}\n"
+            f"  T = {self.engine.T}\n"
+            f"  N_seeds = {self.num_seeds_used}\n\n"
+            f"Correlations:\n"
+            f"  Spearman = {spearman_corr:.3f}\n"
+            f"  Pearson = {pearson_corr:.3f}\n\n"
+            f"Fit P = 2^(-aK - b):\n"
+            f"  a = {a_param:.3f}\n"
+            f"  b = {b_param:.3f}"
+        )
+
+        # Place text box in upper right
+        props = dict(boxstyle='round', facecolor='white', alpha=0.8)
+        plt.text(0.95, 0.95, stats_text, transform=plt.gca().transAxes, fontsize=10,
+                 verticalalignment='top', horizontalalignment='right', bbox=props)
+
         plt.grid(True, alpha=0.3)
+        plt.legend(loc='lower left')
         plt.show()
