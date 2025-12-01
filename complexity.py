@@ -21,7 +21,6 @@ class ComplexityMetric(ABC):
 
 # --- Concrete Implementations ---
 
-# TODO understand why we have the name function, and if that means these should be static
 class ZlibComplexity(ComplexityMetric):
     def calculate(self, image: np.ndarray) -> float:
         # Implementation: Compress byte string

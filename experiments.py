@@ -19,7 +19,6 @@ class SimplicityBiasExperiment:
     Generates distribution plots.
     """
 
-    # TODO why is it elementaryCA?
     def __init__(self, engine: ElementaryCA, metric: ComplexityMetric):
         self.engine = engine
         self.metric = metric
@@ -40,7 +39,6 @@ class SimplicityBiasExperiment:
                 phenotypes.append(img)
             self.results[rule] = phenotypes
 
-    # TODO fix the damn return statement
     def analyze(self, shuffle_control=False):
         """
         Hashes phenotypes and calculates complexity.
@@ -255,7 +253,6 @@ class RobustnessExperiment:
 
         return rule_robustness_scores, rule_phenotype_complexity_scores
 
-    # TODO make sure the logic is sound
     def compute_ncc_robustness_seed_mut(self, num_seeds=50) -> tuple[dict[int, float], dict[int, float]]:
         """
         Returns dictionaries {rule_id: robustness_score}, {rule_id, phenotype_complexity}.

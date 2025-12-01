@@ -3,7 +3,6 @@ from complexity import ZlibComplexity, MutualInfoComplexity
 from experiments import SimplicityBiasExperiment, RobustnessExperiment, PopulationGrowthExperiment
 import matplotlib.pyplot as plt
 
-# TODO when we create graphs, we need the params to be written
 def main():
     # 1. Setup Configuration
     # TODO with bigger L, it seems further from the limit, weird
