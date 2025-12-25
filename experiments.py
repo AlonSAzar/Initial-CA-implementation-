@@ -1,3 +1,4 @@
+import random
 from collections import Counter
 from typing import Tuple, Dict, Any
 
@@ -7,11 +8,18 @@ import pandas as pd
 import numpy as np
 from scipy.stats import pearsonr, spearmanr, linregress
 
-
-
+from conditional_complexity import ZlibConditionalComplexity
 # Import from other modules
 from engine import ElementaryCA
 from complexity import ComplexityMetric
+
+
+def shuffle_image_rows(image: np.ndarray) -> np.ndarray:
+    shuffled = image.copy()
+    for row in shuffled:
+        np.random.shuffle(row)
+    return shuffled
+
 
 class SimplicityBiasExperiment:
     """
@@ -58,7 +66,7 @@ class SimplicityBiasExperiment:
         for img in tqdm(all_images, desc="Analyzing Complexity"):
             # Optional: Shuffle image to test control
             if shuffle_control:
-                img = self.shuffle_image_rows(img)
+                img = shuffle_image_rows(img)
 
             h = img.tobytes()  # Hash
             freq_map[h] += 1
@@ -67,12 +75,6 @@ class SimplicityBiasExperiment:
                 complexity_map[h] = self.metric.calculate(img)
 
         return freq_map, complexity_map
-
-    def shuffle_image_rows(self, image: np.ndarray) -> np.ndarray:
-        shuffled = image.copy()
-        for row in shuffled:
-            np.random.shuffle(row)
-        return shuffled
 
     """This function specifically was written by AI, since it's a plotting function"""
     def plot_results(self, freq_map, complexity_map, title_add: str = ""):
@@ -215,7 +217,8 @@ class RobustnessExperiment:
         self.engine = engine
         self.metric = metric
 
-    def compute_ncc_robustness_rule_mut(self, num_seeds=50) -> tuple[dict[int, float], dict[int, float]]:
+    def compute_ncc_robustness_rule_or_seed_mut(self, num_seeds=50, variable="rule", mut_type="one_bit", shuffle_control=False) -> tuple[
+        dict[int, float], dict[int, float]]:
         """
         Returns dictionaries {rule_id: robustness_score}, {rule_id, phenotype_complexity}.
         Robustness = Average NCC between Rule(seed) and MutantRule(seed).
@@ -235,9 +238,37 @@ class RobustnessExperiment:
 
                 # Check all 8 1-bit neighbors
                 mutant_scores = []
-                for bit in range(8):
-                    mut_rule = self.engine.mutate_rule(rule, bit)
-                    mut_img = self.engine.run(mut_rule, seed)[1:]
+                
+                bit_length = 0
+                if variable == "rule":
+                    bit_length = 8
+                elif variable == "seed":
+                    bit_length = len(seed)
+                
+                for bit in range(bit_length):
+                    if mut_type == "random_rule":
+                        rand_rule = random.randint(0, 255)
+                        mut_img = self.engine.run(rand_rule, seed)[1:]
+
+                    elif mut_type == "random_seed":
+                        rand_seed = self.engine.generate_seed()
+                        mut_img = self.engine.run(rule, rand_seed)[1:]
+
+                    elif mut_type == "random_everything":
+                        rand_seed = self.engine.generate_seed()
+                        rand_rule = random.randint(0, 255)
+                        mut_img = self.engine.run(rand_rule, rand_seed)[1:]
+                    
+                    elif variable == "rule":
+                        mut_rule = self.engine.mutate_rule(rule, bit)
+                        mut_img = self.engine.run(mut_rule, seed)[1:]
+
+                    elif variable == "seed":
+                        mut_seed = self.engine.mutate_seed(seed, bit)
+                        mut_img = self.engine.run(rule, mut_seed)[1:]
+
+                    if shuffle_control:
+                        mut_img = shuffle_image_rows(mut_img)
 
                     # Compute NCC (Normalized Cross Correlation)
                     ncc = compute_ncc(base_img, mut_img)
@@ -252,45 +283,6 @@ class RobustnessExperiment:
         rule_phenotype_complexity_scores = self.mean_phenotype_complexity(rule_images_dict)
 
         return rule_robustness_scores, rule_phenotype_complexity_scores
-
-    def compute_ncc_robustness_seed_mut(self, num_seeds=50) -> tuple[dict[int, float], dict[int, float]]:
-        """
-        Returns dictionaries {rule_id: robustness_score}, {rule_id, phenotype_complexity}.
-        Robustness = Average NCC between Rule(seed) and Rule(mutant_seed).
-        """
-        rule_robustness_scores = {}
-        rule_phenotype_complexity_scores = {}
-        rule_images_dict = {}
-        seeds = [self.engine.generate_seed() for _ in range(num_seeds)]
-
-        for rule in tqdm(range(256), desc="Evolutionary Robustness"):
-            rule_score = 0
-            rule_images_list = []
-
-            for seed in seeds:
-                base_img = self.engine.run(rule, seed)[1:]
-                rule_images_list.append(base_img)
-
-                # Check all 1-bit neighbors of the seed
-                mutant_scores = []
-                for bit in range(len(seed)):
-                    mut_seed = self.engine.mutate_seed(seed, bit)
-                    mut_img = self.engine.run(rule, mut_seed)[1:]
-
-                    # Compute NCC (Normalized Cross Correlation)
-                    ncc = compute_ncc(base_img, mut_img)
-                    mutant_scores.append(ncc)
-
-                rule_score += np.mean(mutant_scores)
-
-            # Calculate average across seeds, per rule
-            rule_robustness_scores[rule] = rule_score / len(seeds)
-            rule_images_dict[rule] = rule_images_list
-
-        rule_phenotype_complexity_scores = self.mean_phenotype_complexity(rule_images_dict)
-
-        return rule_robustness_scores, rule_phenotype_complexity_scores
-
 
     def compute_rule_complexity(self, rule: int):
         """Compute the complexity of the array represented by the rule itself."""
@@ -347,6 +339,159 @@ class RobustnessExperiment:
 
         plt.grid(True, alpha=0.3)
         plt.show()
+
+
+class ConditionalTransitionExperiment:
+    def __init__(self, engine, metric):
+        self.engine = engine
+        self.metric = metric
+
+    def run(self, rule_id, num_parents=50):
+        """
+        Maps transitions P(x -> y) vs Conditional Complexity K(y|x).
+        """
+
+        transitions = Counter() # Counts of specific (hash(x), hash(y))
+        phenotype_cache = {}        # Stores actual images by hash
+
+        parent_seeds = [self.engine.generate_seed() for _ in range(num_parents)]
+
+        for p_seed in tqdm(parent_seeds, desc="Mapping Transitions"):
+            # get parent phenotype
+            img_x = self.engine.run(rule_id, p_seed)
+            h_x = img_x.tobytes()
+            phenotype_cache[h_x] = img_x
+
+            # Generate mutants (1-bit flip neighbors)
+            # Assuming seed length is engine.L
+            for bit in range(self.engine.L):
+                m_seed = self.engine.mutate_rule(rule_id, bit)
+                # You need a mutate_seed method in your Engine
+                # Creating manual bit flip for now:
+                m_seed = p_seed.copy()
+                m_seed[bit] = 1 - m_seed[bit]
+
+                # Get Mutant Phenotype (y)
+                img_y = self.engine.run(rule_id, m_seed)
+                h_y = img_y.tobytes()
+                phenotype_cache[h_y] = img_y
+
+                # Record Transition
+                transitions[(h_x, h_y)] += 1
+
+        # 3. Analyze Data points
+        plot_data_k = []
+        plot_data_prob = []
+
+        total_transitions = sum(transitions.values())
+
+        print("Calculating Conditional Complexities...")
+        for (h_x, h_y), count in transitions.items():
+            img_x = phenotype_cache[h_x]
+            img_y = phenotype_cache[h_y]
+
+            zlib_cond_complexity = ZlibConditionalComplexity
+
+            # Calculate K(y|x)
+            k_cond = zlib_cond_complexity.calculate(img_x, img_y)
+
+            # Probability P(x->y) approx Frequency
+            # Note: The paper often normalizes by parent occurrences,
+            # but raw frequency is a good start.
+            prob = count / total_transitions
+
+            plot_data_k.append(k_cond)
+            plot_data_prob.append(np.log10(prob))
+
+        return plot_data_k, plot_data_prob
+    
+    
+    """This function specifically was written by AI, since it's a plotting function"""
+    def plot_results(self, freq_map, complexity_map, title_add: str = ""):
+        """
+        Visualizes the Simplicity Bias with Upper Bound Fit and Stats.
+        """
+        Ks = []  # Complexities
+        log_probs = []  # log(Probability)
+        total = sum(freq_map.values())
+
+        for h, count in freq_map.items():
+            Ks.append(complexity_map[h])
+            log_probs.append(np.log10(count / total))
+
+        # Convert to numpy for calculations
+        Ks = np.array(Ks)
+        log_probs = np.array(log_probs)
+
+        # ---------------- CORRELATIONS ----------------
+        if len(Ks) > 1:
+            pearson_corr, _ = pearsonr(Ks, log_probs)
+            spearman_corr, _ = spearmanr(Ks, log_probs)
+        else:
+            pearson_corr = spearman_corr = 0
+
+        # ---------------- UPPER BOUND FITTING ----------------
+        # 1. Find max probability for each unique complexity value
+        unique_ks = np.unique(Ks)
+        max_log_probs = []
+        for k in unique_ks:
+            # Get all log_probs that have complexity == k
+            max_val = np.max(log_probs[Ks == k])
+            max_log_probs.append(max_val)
+
+        unique_ks = np.array(unique_ks)
+        max_log_probs = np.array(max_log_probs)
+
+        # 2. Fit linear regression to the upper bound (y = mx + c)
+        if len(unique_ks) > 1:
+            slope, intercept, r_val, p_val, std_err = linregress(unique_ks, max_log_probs)
+        else:
+            slope, intercept = 0, 0
+
+        # 3. Convert to form P(p) = 2^(-aK - b)
+        # We fitted log10(P) = slope * K + intercept
+        # a = -slope * log2(10), b = -intercept * log2(10)
+        log2_10 = np.log2(10)
+        a_param = -slope * log2_10
+        b_param = -intercept * log2_10
+
+        # ---------------- PLOTTING ----------------
+        plt.figure(figsize=(10, 7))
+
+        # Scatter Plot
+        plt.scatter(Ks, log_probs, alpha=0.5, label='Phenotypes')
+
+        # Plot Fitted Line
+        x_line = np.linspace(min(Ks), max(Ks), 100)
+        y_line = slope * x_line + intercept
+        plt.plot(x_line, y_line, color='red', linestyle='--', linewidth=2, label='Upper Bound Fit')
+
+        # Labels
+        plt.xlabel(f"Complexity ({self.metric.name()})")
+        plt.ylabel("Log10 Probability")
+        plt.title(f"Conditional Simplicity Bias (Standard CA, L={self.engine.L}, T={self.engine.T}), " + title_add)
+
+        # Info Box
+        stats_text = (
+            f"Simulation Parameters:\n"
+            f"  N_seeds = {self.num_seeds_used}\n\n"
+            f"Correlations:\n"
+            f"  Spearman = {spearman_corr:.3f}\n"
+            f"  Pearson = {pearson_corr:.3f}\n\n"
+            f"Fit P = 2^(-aK - b):\n"
+            f"  a = {a_param:.3f}\n"
+            f"  b = {b_param:.3f}"
+        )
+
+        props = dict(boxstyle='round', facecolor='white', alpha=0.8)
+        plt.text(0.95, 0.95, stats_text, transform=plt.gca().transAxes, fontsize=10,
+                 verticalalignment='top', horizontalalignment='right', bbox=props)
+
+        plt.grid(True, alpha=0.3)
+        plt.legend(loc='lower left')
+        plt.show()
+    
+    
 
 
 
